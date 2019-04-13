@@ -19,7 +19,7 @@ export type FiberData = {|
   type: ElementType,
 |};
 
-export type NativeType = {};
+export type NativeType = Object;
 export type RendererID = number;
 
 type Dispatcher = any;
@@ -90,36 +90,40 @@ export type ProfilingSummary = {|
   rootID: number,
 |};
 
-export type RendererInterface = {
+export type LegacyRendererInterface = {
   cleanup: () => void,
-  findNativeByFiberID: (id: number) => ?NativeType,
-  flushInitialOperations: () => void,
-  getCommitDetails: (rootID: number, commitIndex: number) => CommitDetails,
-  getFiberIDFromNative: (
+  getInternalIDFromNative: (
     component: NativeType,
     findNearestUnfilteredAncestor?: boolean
   ) => number | null,
+  getNativeFromInternal: (id: number) => ?NativeType,
+  inspectElement: (id: number) => InspectedElement | null,
+  logElementToConsole: (id: number) => void,
+  prepareViewElementSource: (id: number) => void,
+  renderer: ReactRenderer | null,
+  selectElement: (id: number) => void,
+  setInContext: (id: number, path: Array<string | number>, value: any) => void,
+  setInProps: (id: number, path: Array<string | number>, value: any) => void,
+  setInState: (id: number, path: Array<string | number>, value: any) => void,
+};
+
+export type RendererInterface = {
+  ...LegacyRendererInterface,
+  flushInitialOperations: () => void,
+  getCommitDetails: (rootID: number, commitIndex: number) => CommitDetails,
   getFiberCommits: (rootID: number, fiberID: number) => FiberCommits,
   getInteractions: (rootID: number) => Interactions,
   getProfilingDataForDownload: (rootID: number) => Object,
   getProfilingSummary: (rootID: number) => ProfilingSummary,
   handleCommitFiberRoot: (fiber: Object) => void,
   handleCommitFiberUnmount: (fiber: Object) => void,
-  inspectElement: (id: number) => InspectedElement | null,
-  logElementToConsole: (id: number) => void,
   overrideSuspense: (id: number, forceFallback: boolean) => void,
-  prepareViewElementSource: (id: number) => void,
-  renderer: ReactRenderer | null,
-  selectElement: (id: number) => void,
-  setInContext: (id: number, path: Array<string | number>, value: any) => void,
   setInHook: (
     id: number,
     index: number,
     path: Array<string | number>,
     value: any
   ) => void,
-  setInProps: (id: number, path: Array<string | number>, value: any) => void,
-  setInState: (id: number, path: Array<string | number>, value: any) => void,
   startProfiling: () => void,
   stopProfiling: () => void,
 };
