@@ -49,10 +49,7 @@ export function attach(
     return ((internalInstanceToIDMap.get(internalInstance): any): number);
   }
 
-  // Before 0.13 there was no Reconciler, so we patch Component.Mixin
-  const isPre013 = !renderer.Reconciler;
-
-  // TODO The below get-native-from-internal and get-internal-from-native methods are probably broken.
+  // TODO The below getNativeFromInternal and getInternalIDFromNative methods are probably broken.
   let getInternalIDFromNative: (
     component: NativeType,
     findNearestUnfilteredAncestor?: boolean
@@ -97,9 +94,9 @@ export function attach(
     );
   }
 
-  let oldMethods;
-  let oldRenderComponent;
-  let oldRenderRoot;
+  let oldReconcilerMethods = null;
+  let oldRenderComponent = null;
+  let oldRenderRoot = null;
 
   // React DOM
   if (renderer.Mount._renderNewRootComponent) {
@@ -150,50 +147,12 @@ export function attach(
     );
   }
 
-  if (renderer.Component) {
-    console.error(
-      'You are using a version of React with limited support in this version of the devtools.\n' +
-        'Please upgrade to use at least 0.13, or you can downgrade to use the old version of the devtools:\n' +
-        'Unstructions here https://github.com/facebook/react-devtools/tree/devtools-next#how-do-i-use-this-for-react--013'
-    );
-
-    // 0.11 - 0.12
-    // $FlowFixMe renderer.Component is not "possibly undefined"
-    oldMethods = decorateMany(renderer.Component.Mixin, {
-      mountComponent() {
-        rootNodeIDMap.set(this._rootNodeID, this);
-        // FIXME DOMComponent calls Component.Mixin, and sets up the
-        // `children` *after* that call, meaning we don't have access to the
-        // children at this point. Maybe we should find something else to shim
-        // (do we have access to DOMComponent here?) so that we don't have to
-        // setTimeout.
-        setTimeout(() => {
-          hook.emit('mount', {
-            internalInstance: this,
-            data: getData012(this),
-            renderer: rid,
-          });
-        }, 0);
-      },
-      updateComponent() {
-        setTimeout(() => {
-          hook.emit('update', {
-            internalInstance: this,
-            data: getData012(this),
-            renderer: rid,
-          });
-        }, 0);
-      },
-      unmountComponent() {
-        hook.emit('unmount', { internalInstance: this, renderer: rid });
-        rootNodeIDMap.delete(this._rootNodeID);
-      },
-    });
-  } else if (renderer.Reconciler) {
-    oldMethods = decorateMany(renderer.Reconciler, {
+  if (renderer.Reconciler) {
+    oldReconcilerMethods = decorateMany(renderer.Reconciler, {
       mountComponent(internalInstance, rootID, transaction, context) {
+        const id = getID(internalInstance);
         const data = getData(internalInstance);
-        rootNodeIDMap.set(internalInstance._rootNodeID, internalInstance);
+
         hook.emit('mount', { internalInstance, data, renderer: rid });
       },
       performUpdateIfNecessary(
@@ -216,44 +175,31 @@ export function attach(
         });
       },
       unmountComponent(internalInstance) {
+        const id = getID(internalInstance);
+
         hook.emit('unmount', { internalInstance, renderer: rid });
-        rootNodeIDMap.delete(internalInstance._rootNodeID);
+
+        idToInternalInstanceMap.delete(id);
+        internalInstance.delete(internalInstance);
       },
     });
   }
 
-  extras.walkTree = function(
-    visit: (component: OpaqueNodeHandle, data: DataType) => void,
-    visitRoot: (internalInstance: OpaqueNodeHandle) => void
-  ) {
-    const onMount = (component, data) => {
-      rootNodeIDMap.set(component._rootNodeID, component);
-      visit(component, data);
-    };
-    walkRoots(
-      renderer.Mount._instancesByReactRootID ||
-        renderer.Mount._instancesByContainerID,
-      onMount,
-      visitRoot,
-      isPre013
-    );
-  };
-
   function cleanup() {
-    if (oldMethods) {
+    if (oldReconcilerMethods !== null) {
       if (renderer.Component) {
-        restoreMany(renderer.Component.Mixin, oldMethods);
+        restoreMany(renderer.Component.Mixin, oldReconcilerMethods);
       } else {
-        restoreMany(renderer.Reconciler, oldMethods);
+        restoreMany(renderer.Reconciler, oldReconcilerMethods);
       }
     }
-    if (oldRenderRoot) {
+    if (oldRenderRoot !== null) {
       renderer.Mount._renderNewRootComponent = oldRenderRoot;
     }
-    if (oldRenderComponent) {
+    if (oldRenderComponent !== null) {
       renderer.Mount.renderComponent = oldRenderComponent;
     }
-    oldMethods = null;
+    oldReconcilerMethods = null;
     oldRenderRoot = null;
     oldRenderComponent = null;
   }
@@ -295,6 +241,36 @@ export function attach(
     }
   }
 
+  function flushInitialOperations() {
+    const onMount = (component, data) => {
+      const id = getID(component);
+      rootNodeIDMap.set(component._rootNodeID, component);
+      visit(component, data);
+    };
+
+    const walkRoots = (roots, onMount, onRoot) => {
+      for (let name in roots) {
+        walkNode(roots[name], onMount);
+        onRoot(roots[name]);
+      }
+    };
+
+    const walkNode = (internalInstance, onMount) => {
+      const data = getData(internalInstance);
+      if (data.children && Array.isArray(data.children)) {
+        data.children.forEach(child => walkNode(child, onMount));
+      }
+      onMount(internalInstance, data);
+    };
+
+    walkRoots(
+      renderer.Mount._instancesByReactRootID ||
+        renderer.Mount._instancesByContainerID,
+      onMount,
+      visitRoot
+    );
+  }
+
   function flushPendingEvents(root: Object): void {
     // Identify which renderer this update is coming from.
     // This enables roots to be mapped to renderers,
@@ -308,6 +284,20 @@ export function attach(
     hook.emit('operations', pendingOperations);
 
     pendingOperations = new Uint32Array(0);
+  }
+
+  function getData(internalInstance: Object): FiberData {
+    let displayName = null;
+    let key = null;
+    let type = ElementTypeOtherOrUnknown;
+
+    // TODO
+
+    return {
+      displayName,
+      key,
+      type,
+    };
   }
 
   function inspectElement(id: number): InspectedElement | null {
@@ -326,84 +316,43 @@ export function attach(
     // TODO
   }
 
-  let setInContext: (
-    id: number,
-    path: Array<string | number>,
-    value: any
-  ) => void = null;
-  let setInProps: (
-    id: number,
-    path: Array<string | number>,
-    value: any
-  ) => void = null;
-  let setInState: (
-    id: number,
-    path: Array<string | number>,
-    value: any
-  ) => void = null;
-  if (isPre013) {
-    setInProps = (id: number, path: Array<string | number>, value: any) => {
-      const instance = idToInternalInstanceMap.get(id);
-      if (instance != null) {
-        instance.props = copyWithSet(instance.props, path, value);
-        instance.forceUpdate();
-      }
-    };
+  function forceUpdate(instance) {
+    if (typeof instance.forceUpdate === 'function') {
+      instance.forceUpdate();
+    } else if (
+      instance.updater != null &&
+      typeof instance.updater.enqueueForceUpdate === 'function'
+    ) {
+      instance.updater.enqueueForceUpdate(this, () => {}, 'forceUpdate');
+    }
+  }
 
-    setInState = (id: number, path: Array<string | number>, value: any) => {
-      const instance = idToInternalInstanceMap.get(id);
-      if (instance != null) {
-        setIn(instance.state, path, value);
-        instance.forceUpdate();
-      }
-    };
+  function setInProps(id: number, path: Array<string | number>, value: any) {
+    const internalInstance = idToInternalInstanceMap.get(id);
+    if (internalInstance != null) {
+      const element = internalInstance._currentElement;
+      internalInstance._currentElement = {
+        ...element,
+        props: copyWithSet(element.props, path, value),
+      };
+      forceUpdate(internalInstance._internalInstance);
+    }
+  }
 
-    setInContext = (id: number, path: Array<string | number>, value: any) => {
-      const instance = idToInternalInstanceMap.get(id);
-      if (instance != null) {
-        setIn(instance.context, path, value);
-        instance.forceUpdate();
-      }
-    };
-  } else {
-    const forceUpdate = instance => {
-      if (typeof instance.forceUpdate === 'function') {
-        instance.forceUpdate();
-      } else if (
-        instance.updater != null &&
-        typeof instance.updater.enqueueForceUpdate === 'function'
-      ) {
-        instance.updater.enqueueForceUpdate(this, () => {}, 'forceUpdate');
-      }
-    };
+  function setInState(id: number, path: Array<string | number>, value: any) {
+    const internalInstance = idToInternalInstanceMap.get(id);
+    if (internalInstance != null) {
+      setIn(internalInstance.state, path, value);
+      internalInstance.forceUpdate();
+    }
+  }
 
-    setInProps = (id: number, path: Array<string | number>, value: any) => {
-      const internalInstance = idToInternalInstanceMap.get(id);
-      if (internalInstance != null) {
-        const element = internalInstance._currentElement;
-        internalInstance._currentElement = {
-          ...element,
-          props: copyWithSet(element.props, path, value),
-        };
-        forceUpdate(internalInstance._internalInstance);
-      }
-    };
-
-    setInState = (id: number, path: Array<string | number>, value: any) => {
-      const internalInstance = idToInternalInstanceMap.get(id);
-      if (internalInstance != null) {
-        setIn(internalInstance.state, path, value);
-        internalInstance.forceUpdate();
-      }
-    };
-
-    setInContext = (id: number, path: Array<string | number>, value: any) => {
-      const internalInstance = idToInternalInstanceMap.get(id);
-      if (internalInstance != null) {
-        setIn(internalInstance.context, path, value);
-        forceUpdate(internalInstance);
-      }
-    };
+  function setInContext(id: number, path: Array<string | number>, value: any) {
+    const internalInstance = idToInternalInstanceMap.get(id);
+    if (internalInstance != null) {
+      setIn(internalInstance.context, path, value);
+      forceUpdate(internalInstance);
+    }
   }
 
   function setIn(obj: Object, path: Array<string | number>, value: any) {
@@ -416,6 +365,7 @@ export function attach(
 
   return {
     cleanup,
+    flushInitialOperations,
     getInternalIDFromNative,
     getNativeFromInternal,
     inspectElement,
@@ -427,23 +377,6 @@ export function attach(
     setInProps,
     setInState,
   };
-}
-
-function walkRoots(roots, onMount, onRoot, isPre013) {
-  for (let name in roots) {
-    walkNode(roots[name], onMount, isPre013);
-    onRoot(roots[name]);
-  }
-}
-
-function walkNode(internalInstance, onMount, isPre013) {
-  const data = isPre013
-    ? getData012(internalInstance)
-    : getData(internalInstance);
-  if (data.children && Array.isArray(data.children)) {
-    data.children.forEach(child => walkNode(child, onMount, isPre013));
-  }
-  onMount(internalInstance, data);
 }
 
 function decorateResult(obj, attr, fn) {

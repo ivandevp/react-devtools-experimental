@@ -92,6 +92,7 @@ export type ProfilingSummary = {|
 
 export type LegacyRendererInterface = {
   cleanup: () => void,
+  flushInitialOperations: () => void,
   getInternalIDFromNative: (
     component: NativeType,
     findNearestUnfilteredAncestor?: boolean
@@ -109,7 +110,6 @@ export type LegacyRendererInterface = {
 
 export type RendererInterface = {
   ...LegacyRendererInterface,
-  flushInitialOperations: () => void,
   getCommitDetails: (rootID: number, commitIndex: number) => CommitDetails,
   getFiberCommits: (rootID: number, fiberID: number) => FiberCommits,
   getInteractions: (rootID: number) => Interactions,
