@@ -4,7 +4,7 @@ import type { DevToolsHook, ReactRenderer, RendererInterface } from './types';
 import Agent from './agent';
 
 import { attach } from './renderer';
-import { attach as attachLegacy } from './renderer-legacy';
+import { attach as attachLegacy } from './legacy/renderer';
 
 export function initBackend(
   hook: DevToolsHook,

@@ -8,8 +8,8 @@ import {
   ElementTypeOtherOrUnknown,
   ElementTypeRoot,
 } from 'src/devtools/types';
-import { getDisplayName, getUID, utfEncodeString } from '../utils';
-import { cleanForBridge, copyWithSet, setInObject } from './utils';
+import { getDisplayName, getUID, utfEncodeString, operationsArrayToString } from '../../utils';
+import { cleanForBridge, copyWithSet, setInObject } from '../utils';
 import {
   __DEBUG__,
   LOCAL_STORAGE_RELOAD_AND_PROFILE_KEY,
@@ -18,13 +18,21 @@ import {
   TREE_OPERATION_RESET_CHILDREN,
   TREE_OPERATION_RECURSIVE_REMOVE_CHILDREN,
   TREE_OPERATION_UPDATE_TREE_BASE_DURATION,
-} from '../constants';
+} from '../../constants';
+import getChildren from './getChildren';
+import {
+  decorateResult,
+  decorate,
+  decorateMany,
+  forceUpdate,
+  restoreMany,
+} from './utils';
 
 import type {
   DevToolsHook,
   NativeType,
   LegacyRendererInterface,
-} from './types';
+} from '../types';
 import type { InspectedElement } from 'src/devtools/views/Components/types';
 
 type Id = any;
@@ -37,8 +45,10 @@ export function attach(
   renderer: LegacyRenderer,
   global: Object
 ): LegacyRendererInterface {
-  const internalInstanceToIDMap: Map<InternalInstance, number> = new Map();
   const idToInternalInstanceMap: Map<number, InternalInstance> = new Map();
+  //const idToParentIDMap: Map<number, number> = new Map();
+  const internalInstanceToIDMap: Map<InternalInstance, number> = new Map();
+  const rootIDSet: Set<number> = new Set();
 
   function getID(internalInstance: InternalInstance): number {
     if (!internalInstanceToIDMap.has(internalInstance)) {
@@ -104,20 +114,14 @@ export function attach(
       renderer.Mount,
       '_renderNewRootComponent',
       internalInstance => {
-        // TODO Is this right? For all versions?
-        const hasOwnerMetadata =
-          internalInstance._currentElement != null &&
-          internalInstance._currentElement._owner != null;
+        const id = getID(internalInstance);
 
-        const operation = new Uint32Array(5);
-        operation[0] = TREE_OPERATION_ADD;
-        operation[1] = getID(internalInstance);
-        operation[2] = ElementTypeRoot;
-        operation[3] = 0; // isProfilingSupported?
-        operation[4] = hasOwnerMetadata ? 1 : 0;
-        addOperation(operation);
+        rootIDSet.add(id);
 
-        // If we're mounting a root, we can sync-flush.
+        recordMount(internalInstance);
+
+        // If we're mounting a root, we've just finished a batch of work,
+        // so it's safe to synchronously flush.
         flushPendingEvents(internalInstance);
       }
     );
@@ -128,20 +132,14 @@ export function attach(
       renderer.Mount,
       'renderComponent',
       internalInstance => {
-        // TODO Is this right? For all versions?
-        const hasOwnerMetadata =
-          internalInstance._currentElement != null &&
-          internalInstance._currentElement._owner != null;
+        const id = getID(internalInstance);
 
-        const operation = new Uint32Array(5);
-        operation[0] = TREE_OPERATION_ADD;
-        operation[1] = getID(internalInstance._reactInternalInstance); // TODO Is this the right internal right?
-        operation[2] = ElementTypeRoot;
-        operation[3] = 0; // isProfilingSupported?
-        operation[4] = hasOwnerMetadata ? 1 : 0;
-        addOperation(operation);
+        rootIDSet.add(id);
 
-        // If we're mounting a root, we can sync-flush.
+        recordMount(internalInstance);
+
+        // If we're mounting a root, we've just finished a batch of work,
+        // so it's safe to synchronously flush.
         flushPendingEvents(internalInstance);
       }
     );
@@ -150,10 +148,8 @@ export function attach(
   if (renderer.Reconciler) {
     oldReconcilerMethods = decorateMany(renderer.Reconciler, {
       mountComponent(internalInstance, rootID, transaction, context) {
-        const id = getID(internalInstance);
-        const data = getData(internalInstance);
-
-        hook.emit('mount', { internalInstance, data, renderer: rid });
+//console.log('mountComponent() id:', getID(internalInstance), 'host parent id:', getID(internalInstance._hostParent))
+        recordMount(internalInstance);
       },
       performUpdateIfNecessary(
         internalInstance,
@@ -161,26 +157,13 @@ export function attach(
         transaction,
         context
       ) {
-        hook.emit('update', {
-          internalInstance,
-          data: getData(internalInstance),
-          renderer: rid,
-        });
+        // TODO Check for change in order of children
       },
       receiveComponent(internalInstance, nextChild, transaction, context) {
-        hook.emit('update', {
-          internalInstance,
-          data: getData(internalInstance),
-          renderer: rid,
-        });
+        // TODO Check for change in order of children
       },
       unmountComponent(internalInstance) {
-        const id = getID(internalInstance);
-
-        hook.emit('unmount', { internalInstance, renderer: rid });
-
-        idToInternalInstanceMap.delete(id);
-        internalInstance.delete(internalInstance);
+        recordUnmount(internalInstance);
       },
     });
   }
@@ -231,6 +214,8 @@ export function attach(
   // but that should be okay, since the batching is not strictly necessary.
   const rootIDToTimeoutIDMap: Map<Id, TimeoutID> = new Map();
   function queueFlushPendingEvents(root: Object) {
+    console.log('queueFlushPendingEvents()', root);
+
     const id = getID(root);
     if (!rootIDToTimeoutIDMap.has(id)) {
       const timeoutID = setTimeout(() => {
@@ -244,7 +229,7 @@ export function attach(
   function flushInitialOperations() {
     const onMount = (component, data) => {
       const id = getID(component);
-      rootNodeIDMap.set(component._rootNodeID, component);
+
       visit(component, data);
     };
 
@@ -254,6 +239,9 @@ export function attach(
         onRoot(roots[name]);
       }
     };
+
+    const visit = root => {};
+    const visitRoot = root => {};
 
     const walkNode = (internalInstance, onMount) => {
       const data = getData(internalInstance);
@@ -280,6 +268,9 @@ export function attach(
     idArray[1] = getID(root);
     addOperation(idArray, true);
 
+    console.log('flushPendingEvents()', pendingOperations);
+    operationsArrayToString(pendingOperations);
+
     // If we've already connected to the frontend, just pass the operations through.
     hook.emit('operations', pendingOperations);
 
@@ -291,7 +282,27 @@ export function attach(
     let key = null;
     let type = ElementTypeOtherOrUnknown;
 
-    // TODO
+    // != used deliberately here to catch undefined and null
+    if (internalInstance._currentElement != null) {
+      if (internalInstance._currentElement.key) {
+        key = String(internalInstance._currentElement.key);
+      }
+
+      const elementType = internalInstance._currentElement.type;
+      if (typeof elementType === 'string') {
+        // ...
+      } else if (typeof elementType === 'function') {
+        // TODO Can we differentiate between function and class component types?
+        type = ElementTypeClass;
+        displayName = getDisplayName(elementType);
+      } else if (typeof internalInstance._stringText === 'string') {
+        // ...
+      } else {
+        // TODO What kind of case does this cover?
+        console.log('what is this type?');
+        displayName = getDisplayName(elementType);
+      }
+    }
 
     return {
       displayName,
@@ -316,15 +327,105 @@ export function attach(
     // TODO
   }
 
-  function forceUpdate(instance) {
-    if (typeof instance.forceUpdate === 'function') {
-      instance.forceUpdate();
-    } else if (
-      instance.updater != null &&
-      typeof instance.updater.enqueueForceUpdate === 'function'
-    ) {
-      instance.updater.enqueueForceUpdate(this, () => {}, 'forceUpdate');
+  function recordMount(internalInstance: InternalInstance) {
+    const id = getID(internalInstance);
+    const isRoot = rootIDSet.has(id);
+
+    //const children = getChildren(internalInstance);
+console.log('recordMount() id:', id, 'isRoot?', isRoot, 'parent:', getID(internalInstance._hostParent), 'children:', getChildren(internalInstance).map(getID))
+    //children.forEach(child => {
+      //idToParentIDMap.set(getID(child), id);
+    //});
+
+    if (isRoot) {
+      // TODO Is this right? For all versions?
+      const hasOwnerMetadata =
+        internalInstance._currentElement != null &&
+        internalInstance._currentElement._owner != null;
+
+      const operation = new Uint32Array(5);
+      operation[0] = TREE_OPERATION_ADD;
+      operation[1] = id;
+      operation[2] = ElementTypeRoot;
+      operation[3] = 0; // isProfilingSupported?
+      operation[4] = hasOwnerMetadata ? 1 : 0;
+      addOperation(operation, true);
+    } else {
+      const { displayName, key, type } = getData(internalInstance);
+
+      const ownerID =
+        internalInstance._currentElement != null &&
+        internalInstance._currentElement._owner != null
+          ? internalInstance._currentElement._owner
+          : 0;
+
+      //const parentID = idToParentIDMap.get(id);
+      const parentID = getID(internalInstance._hostParent)
+
+      let encodedDisplayName = ((null: any): Uint8Array);
+      let encodedKey = ((null: any): Uint8Array);
+
+      if (displayName !== null) {
+        encodedDisplayName = utfEncodeString(displayName);
+      }
+
+      if (key !== null) {
+        // React$Key supports string and number types as inputs,
+        // But React converts numeric keys to strings, so we only have to handle that type here.
+        // https://github.com/facebook/react/blob/0e67969cb1ad8c27a72294662e68fa5d7c2c9783/packages/react/src/ReactElement.js#L187
+        encodedKey = utfEncodeString(((key: any): string));
+      }
+
+      const encodedDisplayNameSize =
+        displayName === null ? 0 : encodedDisplayName.length;
+      const encodedKeySize = key === null ? 0 : encodedKey.length;
+
+      const operation = new Uint32Array(
+        7 + encodedDisplayNameSize + encodedKeySize
+      );
+      operation[0] = TREE_OPERATION_ADD;
+      operation[1] = id;
+      operation[2] = type;
+      operation[3] = parentID;
+      operation[4] = ownerID;
+      operation[5] = encodedDisplayNameSize;
+      if (displayName !== null) {
+        operation.set(encodedDisplayName, 6);
+      }
+      operation[6 + encodedDisplayNameSize] = encodedKeySize;
+      if (key !== null) {
+        operation.set(encodedKey, 6 + encodedDisplayNameSize + 1);
+      }
+      addOperation(operation, true);
     }
+  }
+
+  function recordUnmount(internalInstance: InternalInstance) {
+    const id = getID(internalInstance);
+    const isRoot = rootIDSet.has(id);
+console.log('recordUnmount() id:', id, 'from parent:', getID(internalInstance._hostParent));
+
+    if (isRoot) {
+      const operation = new Uint32Array(2);
+      operation[0] = TREE_OPERATION_REMOVE;
+      operation[1] = id;
+      addOperation(operation);
+
+      isRoot.delete(id);
+    } else if (!shouldFilterNode(internalInstance)) {
+      const operation = new Uint32Array(2);
+      operation[0] = TREE_OPERATION_REMOVE;
+      operation[1] = id;
+      addOperation(operation);
+    }
+
+    idToInternalInstanceMap.delete(id);
+    //idToParentIDMap.delete(id);
+    internalInstanceToIDMap.delete(internalInstance);
+  }
+
+  function shouldFilterNode(internalInstance: InternalInstance): boolean {
+    return false; // TODO
   }
 
   function setInProps(id: number, path: Array<string | number>, value: any) {
@@ -377,38 +478,4 @@ export function attach(
     setInProps,
     setInState,
   };
-}
-
-function decorateResult(obj, attr, fn) {
-  const old = obj[attr];
-  obj[attr] = function(instance: NodeLike) {
-    const res = old.apply(this, arguments);
-    fn(res);
-    return res;
-  };
-  return old;
-}
-
-function decorate(obj, attr, fn) {
-  const old = obj[attr];
-  obj[attr] = function(instance: NodeLike) {
-    const res = old.apply(this, arguments);
-    fn.apply(this, arguments);
-    return res;
-  };
-  return old;
-}
-
-function decorateMany(source, fns) {
-  const olds = {};
-  for (const name in fns) {
-    olds[name] = decorate(source, name, fns[name]);
-  }
-  return olds;
-}
-
-function restoreMany(source, olds) {
-  for (let name in olds) {
-    source[name] = olds[name];
-  }
 }
