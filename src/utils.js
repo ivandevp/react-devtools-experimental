@@ -77,17 +77,13 @@ export function operationsArrayToString(operations: Uint32Array) {
   const rendererID = operations[0];
   const rootID = operations[1];
 
-  console.group("rendererID:", rendererID, "rootID:", rootID);
+  console.group('rendererID:', rendererID, 'rootID:', rootID);
 
   let i = 2;
   while (i < operations.length) {
     let id: number = ((null: any): number);
-    let element: Element = ((null: any): Element);
-    let ownerID: number = 0;
     let parentID: number = ((null: any): number);
-    let parentElement: Element = ((null: any): Element);
     let type: ElementType = ((null: any): ElementType);
-    let weightDelta: number = 0;
 
     const operation = operations[i];
 
@@ -101,17 +97,13 @@ export function operationsArrayToString(operations: Uint32Array) {
         if (type === ElementTypeRoot) {
           console.log(`Add root fiber ${id}`);
 
-          const supportsProfiling = operations[i] > 0;
-          i++;
-
-          const hasOwnerMetadata = operations[i] > 0;
-          i++;
+          i++; // supportsProfiling
+          i++; // hasOwnerMetadata
         } else {
           parentID = ((operations[i]: any): number);
           i++;
 
-          ownerID = ((operations[i]: any): number);
-          i++;
+          i++; // ownerID
 
           const displayNameLength = operations[i];
           i++;
@@ -125,14 +117,10 @@ export function operationsArrayToString(operations: Uint32Array) {
 
           const keyLength = operations[i];
           i++;
-          const key =
-            keyLength === 0
-              ? null
-              : utfDecodeString((operations.slice(i, i + keyLength): any));
           i += +keyLength;
 
           console.log(
-            `Add fiber ${id} (${displayName || "null"}) as child of ${parentID}`
+            `Add fiber ${id} (${displayName || 'null'}) as child of ${parentID}`
           );
         }
         break;
@@ -162,7 +150,7 @@ export function operationsArrayToString(operations: Uint32Array) {
 
         i = i + 3 + numChildren;
 
-        console.log(`Re-order fiber ${id} children ${children.join(",")}`);
+        console.log(`Re-order fiber ${id} children ${children.join(',')}`);
         break;
       case TREE_OPERATION_UPDATE_TREE_BASE_DURATION:
         // Base duration updates are only sent while profiling is in progress.

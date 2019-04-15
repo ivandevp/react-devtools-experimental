@@ -12,9 +12,8 @@ import {
 } from '../constants';
 import { ElementTypeRoot } from './types';
 import { utfDecodeString } from '../utils';
-//import { __DEBUG__ } from '../constants';
+import { __DEBUG__ } from '../constants';
 import ProfilingCache from './ProfilingCache';
-const __DEBUG__ = true;
 
 import type { ElementType } from './types';
 import type { Element } from './views/Components/types';

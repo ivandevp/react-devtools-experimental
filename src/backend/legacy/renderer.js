@@ -1,14 +1,7 @@
 // @flow
 
-import {
-  ElementTypeClass,
-  ElementTypeFunction,
-  ElementTypeEventComponent,
-  ElementTypeEventTarget,
-  ElementTypeOtherOrUnknown,
-  ElementTypeRoot,
-} from 'src/devtools/types';
-import { getDisplayName, getUID, utfEncodeString, operationsArrayToString } from '../../utils';
+import { ElementTypeClass, ElementTypeRoot } from 'src/devtools/types';
+import { getUID, utfEncodeString, operationsArrayToString } from '../../utils';
 import { cleanForBridge, copyWithSet, setInObject } from '../utils';
 import {
   __DEBUG__,
@@ -20,6 +13,8 @@ import {
   TREE_OPERATION_UPDATE_TREE_BASE_DURATION,
 } from '../../constants';
 import getChildren from './getChildren';
+import getData from './getData';
+import getElementType from './getElementType';
 import {
   decorateResult,
   decorate,
@@ -46,8 +41,9 @@ export function attach(
   global: Object
 ): LegacyRendererInterface {
   const idToInternalInstanceMap: Map<number, InternalInstance> = new Map();
-  //const idToParentIDMap: Map<number, number> = new Map();
   const internalInstanceToIDMap: Map<InternalInstance, number> = new Map();
+  const pendingMountIDs: Set<number> = new Set();
+  const pendingUnmountIDs: Set<number> = new Set();
   const rootIDSet: Set<number> = new Set();
 
   function getID(internalInstance: InternalInstance): number {
@@ -57,6 +53,14 @@ export function attach(
       idToInternalInstanceMap.set(id, internalInstance);
     }
     return ((internalInstanceToIDMap.get(internalInstance): any): number);
+  }
+
+  function getChildIDs(internalInstance: InternalInstance): Array<number> {
+    return getChildren(internalInstance).map(getID);
+  }
+
+  function getParentID(internalInstance: InternalInstance): number {
+    return getID(internalInstance._hostParent);
   }
 
   // TODO The below getNativeFromInternal and getInternalIDFromNative methods are probably broken.
@@ -70,15 +74,19 @@ export function attach(
   if (renderer.Mount.findNodeHandle && renderer.Mount.nativeTagToRootNodeID) {
     getInternalIDFromNative = (nativeTag, findNearestUnfilteredAncestor) =>
       renderer.Mount.nativeTagToRootNodeID(nativeTag);
-    getNativeFromInternal = component =>
-      renderer.Mount.findNodeHandle(component);
+    getNativeFromInternal = (id: number) => {
+      const internalInstance = idToInternalInstanceMap.get(id);
+      renderer.Mount.findNodeHandle(internalInstance);
+    }
 
     // React DOM 15+
   } else if (renderer.ComponentTree) {
     getInternalIDFromNative = (node, findNearestUnfilteredAncestor) =>
       renderer.ComponentTree.getClosestInstanceFromNode(node);
-    getNativeFromInternal = component =>
-      renderer.ComponentTree.getNodeFromInstance(component);
+    getNativeFromInternal = (id: number) => {
+      const internalInstance = idToInternalInstanceMap.get(id);
+      renderer.ComponentTree.getNodeFromInstance(internalInstance);
+    }
 
     // React DOM
   } else if (renderer.Mount.getID && renderer.Mount.getNode) {
@@ -118,7 +126,7 @@ export function attach(
 
         rootIDSet.add(id);
 
-        recordMount(internalInstance);
+        recordPendingMount(internalInstance);
 
         // If we're mounting a root, we've just finished a batch of work,
         // so it's safe to synchronously flush.
@@ -136,7 +144,7 @@ export function attach(
 
         rootIDSet.add(id);
 
-        recordMount(internalInstance);
+        recordPendingMount(internalInstance);
 
         // If we're mounting a root, we've just finished a batch of work,
         // so it's safe to synchronously flush.
@@ -148,8 +156,7 @@ export function attach(
   if (renderer.Reconciler) {
     oldReconcilerMethods = decorateMany(renderer.Reconciler, {
       mountComponent(internalInstance, rootID, transaction, context) {
-//console.log('mountComponent() id:', getID(internalInstance), 'host parent id:', getID(internalInstance._hostParent))
-        recordMount(internalInstance);
+        recordPendingMount(internalInstance);
       },
       performUpdateIfNecessary(
         internalInstance,
@@ -163,7 +170,7 @@ export function attach(
         // TODO Check for change in order of children
       },
       unmountComponent(internalInstance) {
-        recordUnmount(internalInstance);
+        recordPendingUnmount(internalInstance);
       },
     });
   }
@@ -214,8 +221,6 @@ export function attach(
   // but that should be okay, since the batching is not strictly necessary.
   const rootIDToTimeoutIDMap: Map<Id, TimeoutID> = new Map();
   function queueFlushPendingEvents(root: Object) {
-    console.log('queueFlushPendingEvents()', root);
-
     const id = getID(root);
     if (!rootIDToTimeoutIDMap.has(id)) {
       const timeoutID = setTimeout(() => {
@@ -259,7 +264,39 @@ export function attach(
     );
   }
 
+  function crawlForUpdates(id: number, parentID: number) {
+    const internalInstance = idToInternalInstanceMap.get(id);
+    const shouldIncludeInTree =
+      parentID === 0 || getElementType(internalInstance) === ElementTypeClass;
+
+    if (shouldIncludeInTree) {
+      const didMount = pendingMountIDs.has(id);
+      const didUnmount = pendingUnmountIDs.has(id);
+
+      // If this node was both mounted and unmounted in the same batch,
+      // just skip it and don't send any update.
+      if (didMount && didUnmount) {
+        pendingUnmountIDs.delete(id);
+        return;
+      } else if (didMount) {
+        recordMount(id, parentID);
+      }
+    }
+
+    getChildIDs(internalInstance).forEach(childID =>
+      crawlForUpdates(childID, shouldIncludeInTree ? id : parentID)
+    );
+  }
+
   function flushPendingEvents(root: Object): void {
+    // TODO Remove entry from queue (queueFlushPendingEvents) if there is one.
+
+    // Crawl tree and queue mounts/updates.
+    crawlForUpdates(getID(root), 0);
+
+    // Send pending deletions.
+    pendingUnmountIDs.forEach(recordUnmount);
+
     // Identify which renderer this update is coming from.
     // This enables roots to be mapped to renderers,
     // Which in turn enables fiber props, states, and hooks to be inspected.
@@ -268,47 +305,14 @@ export function attach(
     idArray[1] = getID(root);
     addOperation(idArray, true);
 
-    console.log('flushPendingEvents()', pendingOperations);
-    operationsArrayToString(pendingOperations);
+    operationsArrayToString(pendingOperations); // TODO DEBUGGING
 
     // If we've already connected to the frontend, just pass the operations through.
     hook.emit('operations', pendingOperations);
 
+    pendingMountIDs.clear();
+    pendingUnmountIDs.clear();
     pendingOperations = new Uint32Array(0);
-  }
-
-  function getData(internalInstance: Object): FiberData {
-    let displayName = null;
-    let key = null;
-    let type = ElementTypeOtherOrUnknown;
-
-    // != used deliberately here to catch undefined and null
-    if (internalInstance._currentElement != null) {
-      if (internalInstance._currentElement.key) {
-        key = String(internalInstance._currentElement.key);
-      }
-
-      const elementType = internalInstance._currentElement.type;
-      if (typeof elementType === 'string') {
-        // ...
-      } else if (typeof elementType === 'function') {
-        // TODO Can we differentiate between function and class component types?
-        type = ElementTypeClass;
-        displayName = getDisplayName(elementType);
-      } else if (typeof internalInstance._stringText === 'string') {
-        // ...
-      } else {
-        // TODO What kind of case does this cover?
-        console.log('what is this type?');
-        displayName = getDisplayName(elementType);
-      }
-    }
-
-    return {
-      displayName,
-      key,
-      type,
-    };
   }
 
   function inspectElement(id: number): InspectedElement | null {
@@ -327,15 +331,17 @@ export function attach(
     // TODO
   }
 
-  function recordMount(internalInstance: InternalInstance) {
-    const id = getID(internalInstance);
-    const isRoot = rootIDSet.has(id);
+  function recordPendingMount(internalInstance: InternalInstance) {
+    pendingMountIDs.add(getID(internalInstance));
+  }
 
-    //const children = getChildren(internalInstance);
-console.log('recordMount() id:', id, 'isRoot?', isRoot, 'parent:', getID(internalInstance._hostParent), 'children:', getChildren(internalInstance).map(getID))
-    //children.forEach(child => {
-      //idToParentIDMap.set(getID(child), id);
-    //});
+  function recordPendingUnmount(internalInstance: InternalInstance) {
+    pendingUnmountIDs.add(getID(internalInstance));
+  }
+
+  function recordMount(id: number, parentID: number) {
+    const internalInstance = idToInternalInstanceMap.get(id);
+    const isRoot = rootIDSet.has(id);
 
     if (isRoot) {
       // TODO Is this right? For all versions?
@@ -349,7 +355,7 @@ console.log('recordMount() id:', id, 'isRoot?', isRoot, 'parent:', getID(interna
       operation[2] = ElementTypeRoot;
       operation[3] = 0; // isProfilingSupported?
       operation[4] = hasOwnerMetadata ? 1 : 0;
-      addOperation(operation, true);
+      addOperation(operation);
     } else {
       const { displayName, key, type } = getData(internalInstance);
 
@@ -358,9 +364,6 @@ console.log('recordMount() id:', id, 'isRoot?', isRoot, 'parent:', getID(interna
         internalInstance._currentElement._owner != null
           ? internalInstance._currentElement._owner
           : 0;
-
-      //const parentID = idToParentIDMap.get(id);
-      const parentID = getID(internalInstance._hostParent)
 
       let encodedDisplayName = ((null: any): Uint8Array);
       let encodedKey = ((null: any): Uint8Array);
@@ -396,14 +399,13 @@ console.log('recordMount() id:', id, 'isRoot?', isRoot, 'parent:', getID(interna
       if (key !== null) {
         operation.set(encodedKey, 6 + encodedDisplayNameSize + 1);
       }
-      addOperation(operation, true);
+      addOperation(operation);
     }
   }
 
   function recordUnmount(internalInstance: InternalInstance) {
     const id = getID(internalInstance);
     const isRoot = rootIDSet.has(id);
-console.log('recordUnmount() id:', id, 'from parent:', getID(internalInstance._hostParent));
 
     if (isRoot) {
       const operation = new Uint32Array(2);
@@ -412,7 +414,7 @@ console.log('recordUnmount() id:', id, 'from parent:', getID(internalInstance._h
       addOperation(operation);
 
       isRoot.delete(id);
-    } else if (!shouldFilterNode(internalInstance)) {
+    } else {
       const operation = new Uint32Array(2);
       operation[0] = TREE_OPERATION_REMOVE;
       operation[1] = id;
@@ -420,12 +422,7 @@ console.log('recordUnmount() id:', id, 'from parent:', getID(internalInstance._h
     }
 
     idToInternalInstanceMap.delete(id);
-    //idToParentIDMap.delete(id);
     internalInstanceToIDMap.delete(internalInstance);
-  }
-
-  function shouldFilterNode(internalInstance: InternalInstance): boolean {
-    return false; // TODO
   }
 
   function setInProps(id: number, path: Array<string | number>, value: any) {

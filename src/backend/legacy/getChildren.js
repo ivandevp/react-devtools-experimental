@@ -3,14 +3,6 @@
 import traverseAllChildrenImpl from './traverseAllChildrenImpl';
 
 export default function getChildren(internalInstance: Object): Array<any> {
-  const childrenToArray = children => {
-    const array = [];
-    for (var name in children) {
-      array.push(children[name]);
-    }
-    return array;
-  };
-
   // If the parent is a native node without rendered children, but with
   // multiple string children, then the `element` that gets passed in here is
   // a plain value -- a string or number.
@@ -22,6 +14,9 @@ export default function getChildren(internalInstance: Object): Array<any> {
     internalInstance._currentElement &&
     internalInstance._currentElement.props
   ) {
+    // DevTools doesn't need to display primative child types,
+    // So we can filter them out early.
+    /*
     const children = [];
 
     // This is a native node without rendered children -- meaning the children
@@ -45,6 +40,7 @@ export default function getChildren(internalInstance: Object): Array<any> {
     );
 
     return children;
+    */
   }
 
   if (internalInstance._instance) {
@@ -58,4 +54,12 @@ export default function getChildren(internalInstance: Object): Array<any> {
   }
 
   return [];
+}
+
+function childrenToArray(children) {
+  const array = [];
+  for (var name in children) {
+    array.push(children[name]);
+  }
+  return array;
 }

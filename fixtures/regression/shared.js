@@ -265,6 +265,10 @@ switch (major) {
     break;
 }
 
+function Even() {
+  return <small>(even)</small>;
+}
+
 // Simple stateful app shared by all React versions
 class SimpleApp extends React.Component {
   state = { count: 0 };
@@ -278,7 +282,7 @@ class SimpleApp extends React.Component {
       <div>
         {count % 2 === 0 ? (
           <span>
-            count: {count} <small>(even)</small>
+            count: {count} <Even />
           </span>
         ) : (
           <span>count: {count}</span>
